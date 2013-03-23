@@ -41,7 +41,7 @@ LIBGD_LOCALES=
 # LIBGD_PATCHES should list any patches, in the the order in
 # which they should be applied to the source code.
 #
-#LIBGD_PATCHES=$(LIBGD_SOURCE_DIR)/configure.patch
+LIBGD_PATCHES=$(LIBGD_SOURCE_DIR)/gd_io.h.patch
 
 #
 # If the compilation of the package requires additional
@@ -113,7 +113,11 @@ $(LIBGD_BUILD_DIR)/.configured: $(DL_DIR)/$(LIBGD_SOURCE) $(LIBGD_PATCHES) make/
 	mv $(BUILD_DIR)/$(LIBGD_DIR) $(LIBGD_BUILD_DIR)
 	sed -i -e 's|libpng12-config --|$(STAGING_PREFIX)/bin/&|' \
 	       -e 's|libpng-config --|$(STAGING_PREFIX)/bin/&|' $(@D)/configure.ac
-#	autoreconf -vif $(@D)
+	if test -n "$(LIBGD_PATCHES)" ; \
+		then cat $(LIBGD_PATCHES) | \
+		patch -d $(LIBGD_BUILD_DIR) -p0 ; \
+        fi
+	autoreconf -vif $(@D)
 	(cd $(@D); \
 		$(TARGET_CONFIGURE_OPTS) \
 		CPPFLAGS="$(STAGING_CPPFLAGS) $(LIBGD_CPPFLAGS)" \
@@ -186,7 +190,6 @@ $(LIBGD_IPK): $(LIBGD_BUILD_DIR)/.built
 	rm -rf $(LIBGD_IPK_DIR) $(BUILD_DIR)/libgd_*_$(TARGET_ARCH).ipk
 	$(MAKE) -C $(LIBGD_BUILD_DIR) DESTDIR=$(LIBGD_IPK_DIR) install-strip transform=''
 	rm -f $(LIBGD_IPK_DIR)/opt/lib/*.la
-	rm -f $(LIBGD_IPK_IDR)/opt/lib/*.a
 	$(MAKE) $(LIBGD_IPK_DIR)/CONTROL/control
 	cd $(BUILD_DIR); $(IPKG_BUILD) $(LIBGD_IPK_DIR)
 
