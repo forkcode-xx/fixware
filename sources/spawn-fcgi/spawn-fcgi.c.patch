@@ -1,0 +1,13 @@
+--- src/spawn-fcgi.c.orig	2013-03-24 21:53:51.733992956 +0800
++++ src/spawn-fcgi.c	2013-03-24 21:54:11.634992689 +0800
+@@ -190,8 +190,8 @@
+ 
+ 	if (unixsocket) {
+ 		if (0 != uid || 0 != gid) {
+-			if (0 == uid) uid = -1;
+-			if (0 == gid) gid = -1;
++//			if (0 == uid) uid = -1;
++//			if (0 == gid) gid = -1;
+ 			if (-1 == chown(unixsocket, uid, gid)) {
+ 				fprintf(stderr, "spawn-fcgi: couldn't chown socket: %s\n", strerror(errno));
+ 				close(fcgi_fd);
