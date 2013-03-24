@@ -1,4 +1,0 @@
-#!/bin/sh
-
-cd /opt/lib/mono
-tar -xzf long-symlinks.tar.gz
