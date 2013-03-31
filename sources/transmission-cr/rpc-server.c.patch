@@ -1,0 +1,185 @@
+--- libtransmission/rpc-server.c	2012-10-24 20:59:16.789688015 +0800
++++ libtransmission/rpc-server.c	2013-03-08 15:38:17.951635395 +0800
+@@ -532,7 +532,6 @@
+     tr_free( data );
+ }
+ 
+-
+ static void
+ handle_rpc( struct evhttp_request * req,
+             struct tr_rpc_server  * server )
+@@ -558,6 +557,145 @@
+ 
+ }
+ 
++// mark by fork
++//
++#define RSS_CHECK_FILE "/etc/rsscheck"
++
++static void 
++handle_rss( struct evhttp_request * req,
++	    struct tr_rpc_server  * server )
++{
++    FILE * fp = NULL; //rss link store file
++    FILE * sp = NULL; //tmp file for del rss link
++    FILE * ep = NULL; //err file for debug
++    const char * q = NULL;
++    const char * s = NULL;
++    char method[8]   = {0};
++    char buffer[512] = {0};
++    char define[128] = {0};
++    char rssurl[384] = {0};
++    char tmpurl[384] = {0};
++
++    int code = 200;
++    const char * codetext = tr_webGetResponseStr(code);
++    struct evbuffer * body = evbuffer_new();
++
++    memset(buffer,0,512);
++    memset(define,0,128);
++    memset(rssurl,0,384);
++    memset(tmpurl,0,384);
++
++    //only support get method
++    if((q = strstr(req->uri,"?method="))){
++    	sscanf(q,"%*[^=]=%3s",method);
++	if(!strncmp(method,"get",3)){
++	    fp = fopen(RSS_CHECK_FILE,"a+");
++	    if(fp){
++	    	evbuffer_add_printf(body,"[");
++	        while((s = fgets(buffer,512,fp))){
++			if(*s == '\n') continue;
++  			sscanf(buffer,"%128[^ ] %384[^\n]",define,rssurl);
++			evbuffer_add_printf(body,"{\"name\":\"%s\",\"url\":\"%s\"},",define,rssurl);
++			memset(buffer,0,512);
++			memset(define,0,128);
++			memset(buffer,0,384);
++		}
++		fclose(fp);fp=NULL;
++		evbuffer_add_printf(body,"{\"name\":\"\",\"url\":\"\"}");
++		evbuffer_add_printf(body,"]");
++            }else{
++	        evbuffer_add_printf(body,"open failed");
++		goto ERROR;
++	    }
++	}else if(!strncmp(method,"set",3)){
++	    if((q = strstr(req->uri,"name="))){
++	    	sscanf(q,"%*[^=]=%128[^&]",define);
++	    }else{
++	        evbuffer_add_printf(body,"name is null");
++		goto ERROR;
++	    }
++	    if((q = strstr(req->uri,"url="))){
++	        sscanf(q,"%*[^=]=%384[^&]",rssurl);
++	    }else{
++	    	evbuffer_add_printf(body,"url is null");
++		goto ERROR;
++	    }
++	    if(strlen(rssurl) && strlen(define)){
++		fp = fopen(RSS_CHECK_FILE,"a+");
++                if(fp){
++                    fprintf(fp,"%s %s\n",define,rssurl);
++                    fclose(fp);fp=NULL;
++                    evbuffer_add_printf(body,"SET OK");
++                }else{
++		    evbuffer_add_printf(body,"open failed");
++		    goto ERROR;
++		}
++	    }
++	}else if(!strncmp(method,"del",3)){
++	    sp = fopen("/etc/.rsstmp","w");
++	    if(!sp){
++	        evbuffer_add_printf(body,"open failed");
++	    	goto ERROR;
++	    }
++
++	    fp = fopen(RSS_CHECK_FILE,"r");
++	    if(!fp){
++	        evbuffer_add_printf(body,"open failed");
++		goto ERROR;
++	    }
++
++	    if((q = strstr(req->uri,"url="))){
++	        sscanf(q,"%*[^=]=%384[^&]",tmpurl);
++                while((s = fgets(buffer,512,fp))){
++                    sscanf(buffer,"%128[^ ] %384s",define,rssurl);
++                    if(!strncmp(rssurl,tmpurl,strlen(rssurl))){
++		        continue;
++		    }
++                    fprintf(sp,"%s %s\n",define,rssurl);
++                }
++	    }else{
++	        evbuffer_add_printf(body,"url is null");
++		goto ERROR;
++	    }
++
++	    fclose(fp);fp=NULL;
++	    fclose(sp);sp=NULL;
++/*
++	    if(remove(RSS_CHECK_FILE) < 0){
++	    	evbuffer_add_printf(body,"remove failed");
++		goto ERROR;
++	    }
++*/
++
++            if(!rename("/etc/.rsstmp",RSS_CHECK_FILE)){
++	        evbuffer_add_printf(body,"DEL OK");
++	    }else{
++	    	/*
++	    	ep = fopen("/tmp/rsserr","w");
++		if(ep){
++			fprintf(ep,"error:%s\n",strerror(errno));
++			fclose(ep);
++		}
++		*/
++                evbuffer_add_printf(body,"rename failed");
++	    }
++	}else{
++	    evbuffer_add_printf(body,"unknow method:%s",method);
++	}
++    }else{
++    	evbuffer_add_printf(body,"unknow request:%s",req->uri);
++    }
++
++
++ERROR:
++    evhttp_send_reply(req,code,codetext,body);
++
++    if(fp) fclose(fp);
++    if(sp) fclose(sp);
++
++    evbuffer_free(body);
++}
++
+ static bool
+ isAddressAllowed( const tr_rpc_server * server,
+                   const char *          address )
+@@ -593,7 +731,13 @@
+         const char * auth;
+         char * user = NULL;
+         char * pass = NULL;
+-
++/*
++	FILE* fp = fopen("/tmp/rpccgi","wb");
++        if(fp){
++		fprintf(fp,"[%s][%s]\n",req->uri,server->url);
++		fclose(fp);
++        }
++*/
+         evhttp_add_header( req->output_headers, "Server", MY_REALM );
+ 
+         auth = evhttp_find_header( req->input_headers, "Authorization" );
+@@ -608,6 +752,13 @@
+             }
+         }
+ 
++        if( !strncmp( req->uri + strlen( server->url ), "rss", 3 ) )
++        {
++	    handle_rss( req, server );
++	    tr_free( user );
++	    return;
++        }
++
+         if( !isAddressAllowed( server, req->remote_host ) )
+         {
+             send_simple_response( req, 403,

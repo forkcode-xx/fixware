@@ -1,0 +1,679 @@
+diff -uN libtransmission/announcer.c libtransmission/announcer.c
+--- libtransmission/announcer.c	2012-10-24 20:59:13.877687945 +0800
++++ libtransmission/announcer.c	2012-11-15 11:08:24.081388832 +0800
+@@ -49,10 +49,10 @@
+     DEFAULT_SCRAPE_INTERVAL_SEC = ( 60 * 30 ),
+ 
+     /* unless the tracker says otherwise, this is the announce interval */
+-    DEFAULT_ANNOUNCE_INTERVAL_SEC = ( 60 * 10 ),
++    DEFAULT_ANNOUNCE_INTERVAL_SEC = ( 60 * 1 ),
+ 
+     /* unless the tracker says otherwise, this is the announce min_interval */
+-    DEFAULT_ANNOUNCE_MIN_INTERVAL_SEC = ( 60 * 2 ),
++    DEFAULT_ANNOUNCE_MIN_INTERVAL_SEC = ( 30 * 1 ),
+ 
+     /* how many web tasks we allow at one time */
+     MAX_CONCURRENT_TASKS = 48,
+@@ -1225,6 +1225,8 @@
+     announce_event = tier_announce_event_pull( tier );
+     req = announce_request_new( announcer, tor, tier, announce_event );
+ 
++//  fprintf(stdout,"tierAnnounce upload:%lld\n",req->up);
++
+     data = tr_new0( struct announce_data, 1 );
+     data->session = announcer->session;
+     data->tierId = tier->key;
+@@ -1550,6 +1552,8 @@
+     const bool is_closing = session->isClosed;
+     const time_t now = tr_time( );
+ 
++//  fprintf(stdout,"onUpkeepTimer beCalled\n");
++
+     tr_sessionLock( session );
+ 
+     /* maybe send out some "stopped" messages for closed torrents */
+diff -uN libtransmission/bandwidth.c libtransmission/bandwidth.c
+--- libtransmission/bandwidth.c	2012-10-24 20:59:13.389687934 +0800
++++ libtransmission/bandwidth.c	2012-12-26 23:53:05.064712183 +0800
+@@ -43,7 +43,7 @@
+         const uint64_t cutoff = now - interval_msec;
+         struct bratecontrol * rvolatile = (struct bratecontrol*) r;
+ 
+-        for( ;; )
++        for(;;)
+         {
+             if( r->transfers[i].date <= cutoff )
+                 break;
+@@ -64,15 +64,18 @@
+ static void
+ bytesUsed( const uint64_t now, struct bratecontrol * r, size_t size )
+ {
+-    if( r->transfers[r->newest].date + GRANULARITY_MSEC >= now )
+-        r->transfers[r->newest].size += size;
+-    else
+-    {
+-        if( ++r->newest == HISTORY_SIZE ) r->newest = 0;
+-        r->transfers[r->newest].date = now;
+-        r->transfers[r->newest].size = size;
++    if( now >= r->transfers[r->newest].date ){
++    	if( r->transfers[r->newest].date + GRANULARITY_MSEC >= now ){
++        	r->transfers[r->newest].size += size;
++		r->cache_time = 0;
++		return;
++    	}
+     }
+ 
++    if( ++r->newest == HISTORY_SIZE ) r->newest = 0;
++    r->transfers[r->newest].date = now;
++    r->transfers[r->newest].size = size;
++
+     /* invalidate cache_val*/
+     r->cache_time = 0;
+ }
+@@ -341,8 +344,11 @@
+             byteCount = bandwidthClamp( b->parent, now, dir, byteCount );
+     }
+ 
++//  fprintf(stdout,"tr_bandwidth: %s , byteCount:%d\n", b ? "not null" : "is null" ,byteCount);
++
+     return byteCount;
+ }
++
+ unsigned int
+ tr_bandwidthClamp( const tr_bandwidth  * b,
+                    tr_direction          dir,
+@@ -388,9 +394,9 @@
+         band->bytesLeft -= MIN( band->bytesLeft, byteCount );
+ 
+ #ifdef DEBUG_DIRECTION
+-if( ( dir == DEBUG_DIRECTION ) && ( band->isLimited ) )
+-fprintf( stderr, "%p consumed %5zu bytes of %5s data... was %6zu, now %6zu left\n",
+-         b, byteCount, (isPieceData?"piece":"raw"), oldBytesLeft, band->bytesLeft );
++    if( ( dir == DEBUG_DIRECTION ) && ( band->isLimited ) )
++	 fprintf( stderr, "%p consumed %5zu bytes of %5s data... was %6zu, now %6zu left\n",
++         	b, byteCount, (isPieceData?"piece":"raw"), oldBytesLeft, band->bytesLeft );
+ #endif
+ 
+     bytesUsed( now, &band->raw, byteCount );
+diff -uN libtransmission/handshake.c libtransmission/handshake.c
+--- libtransmission/handshake.c	2012-10-24 20:59:15.545687985 +0800
++++ libtransmission/handshake.c	2012-11-15 11:48:13.232018051 +0800
+@@ -59,7 +59,7 @@
+     CRYPTO_PROVIDE_CRYPTO          = 2,
+ 
+     /* how long to wait before giving up on a handshake */
+-    HANDSHAKE_TIMEOUT_SEC          = 30
++    HANDSHAKE_TIMEOUT_SEC          = 10 //old value is 30
+ };
+ 
+ 
+@@ -1204,12 +1204,11 @@
+     tr_peerIoSetIOFuncs( handshake->io, canRead, NULL, gotError, handshake );
+     tr_peerIoSetEncryption( io, PEER_ENCRYPTION_NONE );
+ 
+-    if( tr_peerIoIsIncoming( handshake->io ) )
++    if( tr_peerIoIsIncoming( handshake->io ) ){
+         setReadState( handshake, AWAITING_HANDSHAKE );
+-    else if( encryptionMode != TR_CLEAR_PREFERRED )
++    }else if( encryptionMode != TR_CLEAR_PREFERRED ){
+         sendYa( handshake );
+-    else
+-    {
++    }else{
+         uint8_t msg[HANDSHAKE_SIZE];
+         buildHandshakeMessage( handshake, msg );
+ 
+diff -uN libtransmission/peer-io.c libtransmission/peer-io.c
+--- libtransmission/peer-io.c	2012-10-24 20:59:13.389687934 +0800
++++ libtransmission/peer-io.c	2013-03-12 05:14:40.188077251 +0800
+@@ -21,6 +21,7 @@
+ #include <libutp/utp.h>
+ 
+ #include "transmission.h"
++#include "stats.h"
+ #include "session.h"
+ #include "bandwidth.h"
+ #include "crypto.h"
+@@ -39,6 +40,8 @@
+  #define EPIPE        WSAECONNRESET
+ #endif
+ 
++#define _CHEAT_DEBUG_ 1
++
+ /* The amount of read bufferring that we allow for uTP sockets. */
+ 
+ #define UTP_READ_BUFFER_SIZE (256 * 1024)
+@@ -145,6 +148,68 @@
+ ****
+ ***/
+ 
++#include <torrent.h>
++
++static unsigned int
++cheatPayload( tr_peerIo * io , 
++const unsigned int payload , 
++float maxRatio , //stop cheating when maxRatio arrived
++uint64_t preDownBytes , //start cheating when preDownBytes arrived
++int minClients, //start cheating when minClient arrived
++unsigned int minUpKB ){ //min upload data per peer-io with cheating method
++//	if(payload < 2048) return payload;
++
++	unsigned int cheatpayload = payload;
++
++	struct tr_session * session = io->session;
++	struct tr_torrent * now = session->torrentList;
++
++	srand(tr_time_msec());
++
++	if(io->stats == NULL){
++		uint8_t * hash = tr_peerIoGetTorrentHash(io);
++		while(now){
++			if(memcmp(now->info.hash,hash,SHA_DIGEST_LENGTH) == 0){
++				TRACE("[ID:%d][name:%s]\n",now->stats.id,now->info.name);
++				io->stats = &(now->stats);
++				break;
++			}
++			now = now->next;
++		}
++	}
++
++	if(io->stats == NULL){
++		TRACE("get tr_stat failed...\n");
++		return payload;
++	}
++
++	TRACE("[downloaded:%llu],[uploaded:%llu],[ratio:%f],[clients:%d]\n",
++		io->stats->downloadedEver,
++		io->stats->uploadedEver,
++		io->stats->ratio,
++		io->stats->peersGettingFromUs);
++
++	if(io->stats->peersGettingFromUs < minClients){
++		TRACE("[min clients not enough]\n");
++		return payload;
++	}
++
++	if(io->stats->ratio > maxRatio){
++		TRACE("[max cheat ratio arrived]\n");
++		return payload;
++	}
++
++	if(io->stats->downloadedEver < preDownBytes){
++		TRACE("[min downloed not enough]\n");
++		return payload;
++	}
++
++        cheatpayload = (minUpKB * 1024) + (1 + rand()%(minUpKB*1024))/3;
++	cheatpayload = MAX(payload,cheatpayload);
++
++	return cheatpayload;
++}
++
+ static void
+ didWriteWrapper( tr_peerIo * io, unsigned int bytes_transferred )
+ {
+@@ -152,19 +217,22 @@
+      {
+         struct tr_datatype * next = io->outbuf_datatypes;
+ 
+-        const unsigned int payload = MIN( next->length, bytes_transferred );
++        const unsigned int payload = MIN(next->length,bytes_transferred);
++	const unsigned int cheatpayload = cheatPayload(io,payload,3.6,64*1024*1024,0,16);
++
+         /* For uTP sockets, the overhead is computed in utp_on_overhead. */
+         const unsigned int overhead =
+             io->socket ? guessPacketOverhead( payload ) : 0;
+-        const uint64_t now = tr_time_msec( );
++        const uint64_t now = tr_time_msec();
+ 
+-        tr_bandwidthUsed( &io->bandwidth, TR_UP, payload, next->isPieceData, now );
++        tr_bandwidthUsed( &io->bandwidth, TR_UP, cheatpayload, next->isPieceData, now );
+ 
+         if( overhead > 0 )
+             tr_bandwidthUsed( &io->bandwidth, TR_UP, overhead, false, now );
+ 
+-        if( io->didWrite )
+-            io->didWrite( io, payload, next->isPieceData, io->userData );
++        if( io->didWrite ){
++            io->didWrite( io, cheatpayload, next->isPieceData, io->userData );
++	}
+ 
+         if( tr_isPeerIo( io ) )
+         {
+@@ -311,12 +379,12 @@
+ {
+     int e;
+     int n;
+-    char errstr[256];
++//    char errstr[256];
+ 
+     EVUTIL_SET_SOCKET_ERROR( 0 );
+     n = evbuffer_write_atmost( io->outbuf, fd, howmuch );
+     e = EVUTIL_SOCKET_ERROR( );
+-    dbgmsg( io, "wrote %d to peer (%s)", n, (n==-1?tr_net_strerror(errstr,sizeof(errstr),e):"") );
++//    fprintf(stderr,"wrote %d to peer (%s)", n, (n==-1?tr_net_strerror(errstr,sizeof(errstr),e):"") );
+ 
+     return n;
+ }
+@@ -361,9 +429,11 @@
+     } else if (res == 0) {
+         /* eof case */
+         what |= BEV_EVENT_EOF;
++    } 
++
++    if (res <= 0){
++	goto error;
+     }
+-    if (res <= 0)
+-        goto error;
+ 
+     if( evbuffer_get_length( io->outbuf ) )
+         tr_peerIoSetEnabled( io, dir, true );
+@@ -631,7 +701,7 @@
+     dbgmsg( io, "socket is %d, utp_socket is %p", socket, utp_socket );
+ 
+     if( io->socket >= 0 ) {
+-        io->event_read = event_new( session->event_base,
++        io->event_read  = event_new( session->event_base,
+                                     io->socket, EV_READ, event_read_cb, io );
+         io->event_write = event_new( session->event_base,
+                                      io->socket, EV_WRITE, event_write_cb, io );
+@@ -692,8 +762,9 @@
+         dbgmsg( NULL, "tr_netOpenPeerSocket returned fd %d", fd );
+     }
+ 
+-    if( fd < 0 && utp_socket == NULL )
++    if( fd < 0 && utp_socket == NULL ){
+         return NULL;
++    }
+ 
+     return tr_peerIoNew( session, parent, addr, port,
+                          torrentHash, false, isSeed, fd, utp_socket );
+@@ -870,8 +941,9 @@
+     dbgmsg( io, "%s:%d is decrementing the IO's refcount from %d to %d",
+                 file, line, io->refCount, io->refCount-1 );
+ 
+-    if( !--io->refCount )
++    if( !--io->refCount ){
+         tr_peerIoFree( io );
++    }
+ }
+ 
+ const tr_address*
+diff -uN libtransmission/peer-io.h libtransmission/peer-io.h
+--- libtransmission/peer-io.h	2012-10-24 20:59:13.389687934 +0800
++++ libtransmission/peer-io.h	2012-12-27 04:55:18.256619535 +0800
+@@ -115,6 +115,8 @@
+ 
+     struct event        * event_read;
+     struct event        * event_write;
++
++    struct tr_stat      * stats; //fork edit
+ }
+ tr_peerIo;
+ 
+diff -uN libtransmission/peer-mgr.c libtransmission/peer-mgr.c
+--- libtransmission/peer-mgr.c	2012-10-24 20:59:13.393687935 +0800
++++ libtransmission/peer-mgr.c	2012-12-26 19:28:32.432796634 +0800
+@@ -47,11 +47,11 @@
+     ATOM_PERIOD_MSEC = ( 60 * 1000 ),
+ 
+     /* how frequently to change which peers are choked */
+-    RECHOKE_PERIOD_MSEC = ( 10 * 1000 ),
++    RECHOKE_PERIOD_MSEC = ( 5 * 1000 ), //old 10*1000
+ 
+     /* an optimistically unchoked peer is immune from rechoking
+        for this many calls to rechokeUploads(). */
+-    OPTIMISTIC_UNCHOKE_MULTIPLIER = 4,
++    OPTIMISTIC_UNCHOKE_MULTIPLIER = 4, //old is 4
+ 
+     /* how frequently to reallocate bandwidth */
+     BANDWIDTH_PERIOD_MSEC = 500,
+@@ -70,7 +70,7 @@
+ 
+     /* max number of peers to ask for per second overall.
+      * this throttle is to avoid overloading the router */
+-    MAX_CONNECTIONS_PER_SECOND = 12,
++    MAX_CONNECTIONS_PER_SECOND = 12, //old 12
+ 
+     MAX_CONNECTIONS_PER_PULSE = (int)(MAX_CONNECTIONS_PER_SECOND * (RECONNECT_PERIOD_MSEC/1000.0)),
+ 
+@@ -1641,6 +1641,8 @@
+ 
+ static void tr_peerMgrSetBlame( tr_torrent *, tr_piece_index_t, int );
+ 
++
++//mark by fork
+ static void
+ peerCallbackFunc( tr_peer * peer, const tr_peer_event * e, void * vt )
+ {
+@@ -1657,17 +1659,23 @@
+             const time_t now = tr_time( );
+             tr_torrent * tor = t->tor;
+ 
++	    int uploadlens = e->length;
++
+             if( e->wasPieceData )
+             {
+                 tor->uploadedCur += e->length;
+-                tr_announcerAddBytes( tor, TR_ANN_UP, e->length );
++	    	//can we cheat here..... hahahaha
++                tr_announcerAddBytes( tor, TR_ANN_UP, /*e->length*/ uploadlens );
+                 tr_torrentSetActivityDate( tor, now );
+                 tr_torrentSetDirty( tor );
+             }
+ 
+             /* update the stats */
+-            if( e->wasPieceData )
+-                tr_statsAddUploaded( tor->session, e->length );
++            if( e->wasPieceData ){
++                tr_statsAddUploaded( tor->session, /*e->length*/ uploadlens );
++	    }
++
++//	    fprintf(stderr,"TR_PEER_PEER_GOT_DATA:%d\n",uploadlens);
+ 
+             /* update our atom */
+             if( peer->atom && e->wasPieceData )
+@@ -3097,6 +3105,7 @@
+     for( i = 0, size = 0; i < peerCount; ++i )
+     {
+         tr_peer * peer = peers[i];
++
+         struct peer_atom * atom = peer->atom;
+ 
+         if( peerIsSeed( peer ) ) /* choke seeds and partial seeds */
+@@ -3143,6 +3152,8 @@
+             ++unchokedInterested;
+     }
+ 
++    //fprintf(stderr,"%s unchokedInterested:%d \n",tr_torrentName(t->tor),unchokedInterested);
++
+     /* optimistic unchoke */
+     if( !t->optimistic && !isMaxedOut && (i<size) )
+     {
+@@ -3221,8 +3232,10 @@
+     /* if it's marked for purging, close it */
+     if( peer->doPurge )
+     {
++    /*
+         tordbg( t, "purging peer %s because its doPurge flag is set",
+                 tr_atomAddrStr( atom ) );
++    */
+         return true;
+     }
+ 
+@@ -3245,8 +3258,10 @@
+         const int idleTime = now - MAX( atom->time, atom->piece_data_time );
+ /*fprintf( stderr, "strictness is %.3f, limit is %d seconds... time since connect is %d, time since piece is %d ... idleTime is %d, doPurge is %d\n", (double)strictness, limit, (int)(now - atom->time), (int)(now - atom->piece_data_time), idleTime, idleTime > limit );*/
+         if( idleTime > limit ) {
++	/*
+             tordbg( t, "purging peer %s because it's been %d secs since we shared anything",
+                        tr_atomAddrStr( atom ), idleTime );
++	*/
+             return true;
+         }
+     }
+@@ -3570,7 +3585,7 @@
+         for( j=0; j<tr_ptrArraySize( &t->peers ); ++j )
+         {
+             tr_peer * peer = tr_ptrArrayNth( &t->peers, j );
+-            tr_peerMsgsPulse( peer->msgs );
++            tr_peerMsgsPulse( peer->msgs ); //can we cheat upload here???
+         }
+     }
+ }
+@@ -4046,10 +4061,17 @@
+            uTP connection attempt.  Are we being optimistic here? */
+         utp = utp && (atom->flags & ADDED_F_UTP_FLAGS);
+ 
++#if 0
+     tordbg( t, "Starting an OUTGOING%s connection with %s",
+             utp ? " µTP" : "",
+             tr_atomAddrStr( atom ) );
++#endif
+ 
++/*
++    TRACE("Starting an OUTGOING%s connection with %s",
++	utp ? " µTP" : "",
++	tr_atomAddrStr( atom ));
++*/
+     io = tr_peerIoNewOutgoing( mgr->session,
+                                &mgr->session->bandwidth,
+                                &atom->addr,
+@@ -4060,8 +4082,10 @@
+ 
+     if( io == NULL )
+     {
+-        tordbg( t, "peerIo not created; marking peer %s as unreachable",
+-                tr_atomAddrStr( atom ) );
++    /*
++        TRACE("peerIo not created; marking peer %s as unreachable",
++                tr_atomAddrStr(atom));
++    */
+         atom->flags2 |= MYFLAG_UNREACHABLE;
+         atom->numFails++;
+     }
+@@ -4096,7 +4120,6 @@
+              tr_torrentIsPrivate( c->tor ) ? "private" : "public",
+              tr_torrentIsSeed( c->tor ) ? "seed" : "downloader" );
+ #endif
+-
+     initiateConnection( mgr, c->tor->torrentPeers, c->atom );
+ }
+ 
+diff -uN libtransmission/rpc-server.c libtransmission/rpc-server.c
+--- libtransmission/rpc-server.c	2012-10-24 20:59:16.789688015 +0800
++++ libtransmission/rpc-server.c	2013-03-08 15:38:17.951635395 +0800
+@@ -532,7 +532,6 @@
+     tr_free( data );
+ }
+ 
+-
+ static void
+ handle_rpc( struct evhttp_request * req,
+             struct tr_rpc_server  * server )
+@@ -558,6 +557,145 @@
+ 
+ }
+ 
++// mark by fork
++//
++#define RSS_CHECK_FILE "/etc/rsscheck"
++
++static void 
++handle_rss( struct evhttp_request * req,
++	    struct tr_rpc_server  * server )
++{
++    FILE * fp = NULL; //rss link store file
++    FILE * sp = NULL; //tmp file for del rss link
++    FILE * ep = NULL; //err file for debug
++    const char * q = NULL;
++    const char * s = NULL;
++    char method[8]   = {0};
++    char buffer[512] = {0};
++    char define[128] = {0};
++    char rssurl[384] = {0};
++    char tmpurl[384] = {0};
++
++    int code = 200;
++    const char * codetext = tr_webGetResponseStr(code);
++    struct evbuffer * body = evbuffer_new();
++
++    memset(buffer,0,512);
++    memset(define,0,128);
++    memset(rssurl,0,384);
++    memset(tmpurl,0,384);
++
++    //only support get method
++    if((q = strstr(req->uri,"?method="))){
++    	sscanf(q,"%*[^=]=%3s",method);
++	if(!strncmp(method,"get",3)){
++	    fp = fopen(RSS_CHECK_FILE,"a+");
++	    if(fp){
++	    	evbuffer_add_printf(body,"[");
++	        while((s = fgets(buffer,512,fp))){
++			if(*s == '\n') continue;
++  			sscanf(buffer,"%128[^ ] %384[^\n]",define,rssurl);
++			evbuffer_add_printf(body,"{\"name\":\"%s\",\"url\":\"%s\"},",define,rssurl);
++			memset(buffer,0,512);
++			memset(define,0,128);
++			memset(buffer,0,384);
++		}
++		fclose(fp);fp=NULL;
++		evbuffer_add_printf(body,"{\"name\":\"\",\"url\":\"\"}");
++		evbuffer_add_printf(body,"]");
++            }else{
++	        evbuffer_add_printf(body,"open failed");
++		goto ERROR;
++	    }
++	}else if(!strncmp(method,"set",3)){
++	    if((q = strstr(req->uri,"name="))){
++	    	sscanf(q,"%*[^=]=%128[^&]",define);
++	    }else{
++	        evbuffer_add_printf(body,"name is null");
++		goto ERROR;
++	    }
++	    if((q = strstr(req->uri,"url="))){
++	        sscanf(q,"%*[^=]=%384[^&]",rssurl);
++	    }else{
++	    	evbuffer_add_printf(body,"url is null");
++		goto ERROR;
++	    }
++	    if(strlen(rssurl) && strlen(define)){
++		fp = fopen(RSS_CHECK_FILE,"a+");
++                if(fp){
++                    fprintf(fp,"%s %s\n",define,rssurl);
++                    fclose(fp);fp=NULL;
++                    evbuffer_add_printf(body,"SET OK");
++                }else{
++		    evbuffer_add_printf(body,"open failed");
++		    goto ERROR;
++		}
++	    }
++	}else if(!strncmp(method,"del",3)){
++	    sp = fopen("/etc/.rsstmp","w");
++	    if(!sp){
++	        evbuffer_add_printf(body,"open failed");
++	    	goto ERROR;
++	    }
++
++	    fp = fopen(RSS_CHECK_FILE,"r");
++	    if(!fp){
++	        evbuffer_add_printf(body,"open failed");
++		goto ERROR;
++	    }
++
++	    if((q = strstr(req->uri,"url="))){
++	        sscanf(q,"%*[^=]=%384[^&]",tmpurl);
++                while((s = fgets(buffer,512,fp))){
++                    sscanf(buffer,"%128[^ ] %384s",define,rssurl);
++                    if(!strncmp(rssurl,tmpurl,strlen(rssurl))){
++		        continue;
++		    }
++                    fprintf(sp,"%s %s\n",define,rssurl);
++                }
++	    }else{
++	        evbuffer_add_printf(body,"url is null");
++		goto ERROR;
++	    }
++
++	    fclose(fp);fp=NULL;
++	    fclose(sp);sp=NULL;
++/*
++	    if(remove(RSS_CHECK_FILE) < 0){
++	    	evbuffer_add_printf(body,"remove failed");
++		goto ERROR;
++	    }
++*/
++
++            if(!rename("/etc/.rsstmp",RSS_CHECK_FILE)){
++	        evbuffer_add_printf(body,"DEL OK");
++	    }else{
++	    	/*
++	    	ep = fopen("/tmp/rsserr","w");
++		if(ep){
++			fprintf(ep,"error:%s\n",strerror(errno));
++			fclose(ep);
++		}
++		*/
++                evbuffer_add_printf(body,"rename failed");
++	    }
++	}else{
++	    evbuffer_add_printf(body,"unknow method:%s",method);
++	}
++    }else{
++    	evbuffer_add_printf(body,"unknow request:%s",req->uri);
++    }
++
++
++ERROR:
++    evhttp_send_reply(req,code,codetext,body);
++
++    if(fp) fclose(fp);
++    if(sp) fclose(sp);
++
++    evbuffer_free(body);
++}
++
+ static bool
+ isAddressAllowed( const tr_rpc_server * server,
+                   const char *          address )
+@@ -593,7 +731,13 @@
+         const char * auth;
+         char * user = NULL;
+         char * pass = NULL;
+-
++/*
++	FILE* fp = fopen("/tmp/rpccgi","wb");
++        if(fp){
++		fprintf(fp,"[%s][%s]\n",req->uri,server->url);
++		fclose(fp);
++        }
++*/
+         evhttp_add_header( req->output_headers, "Server", MY_REALM );
+ 
+         auth = evhttp_find_header( req->input_headers, "Authorization" );
+@@ -608,6 +752,13 @@
+             }
+         }
+ 
++        if( !strncmp( req->uri + strlen( server->url ), "rss", 3 ) )
++        {
++	    handle_rss( req, server );
++	    tr_free( user );
++	    return;
++        }
++
+         if( !isAddressAllowed( server, req->remote_host ) )
+         {
+             send_simple_response( req, 403,
+diff -uN libtransmission/session.c libtransmission/session.c
+--- libtransmission/session.c	2012-10-24 20:59:16.153687999 +0800
++++ libtransmission/session.c	2012-11-15 12:16:14.197718360 +0800
+@@ -363,7 +363,7 @@
+     tr_bencDictAddInt ( d, TR_PREFS_KEY_USPEED_KBps,                     100 );
+     tr_bencDictAddBool( d, TR_PREFS_KEY_USPEED_ENABLED,                  false );
+     tr_bencDictAddInt ( d, TR_PREFS_KEY_UMASK,                           022 );
+-    tr_bencDictAddInt ( d, TR_PREFS_KEY_UPLOAD_SLOTS_PER_TORRENT,        14 );
++    tr_bencDictAddInt ( d, TR_PREFS_KEY_UPLOAD_SLOTS_PER_TORRENT,        64 );
+     tr_bencDictAddStr ( d, TR_PREFS_KEY_BIND_ADDRESS_IPV4,               TR_DEFAULT_BIND_ADDRESS_IPV4 );
+     tr_bencDictAddStr ( d, TR_PREFS_KEY_BIND_ADDRESS_IPV6,               TR_DEFAULT_BIND_ADDRESS_IPV6 );
+     tr_bencDictAddBool( d, TR_PREFS_KEY_START,                           true );
+diff -uN libtransmission/transmission.h libtransmission/transmission.h
+--- libtransmission/transmission.h	2012-10-24 20:59:15.649687988 +0800
++++ libtransmission/transmission.h	2012-12-27 09:31:41.741537524 +0800
+@@ -41,6 +41,14 @@
+ ****
+ ***/
+ 
++
++#ifdef _DEBUG_
++#define TRACE(fmt,a...) fprintf(stderr,"%s:%s,%d:"fmt"\n" \
++                                ,__FILE__,__FUNCTION__,__LINE__,##a)
++#else
++#define TRACE(fmt,a...)
++#endif
++
+ #include <inttypes.h> /* uintN_t */
+ #include <time.h> /* time_t */
+ 

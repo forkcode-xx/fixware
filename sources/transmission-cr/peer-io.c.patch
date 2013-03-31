@@ -1,0 +1,176 @@
+--- libtransmission/peer-io.c	2012-10-24 20:59:13.389687934 +0800
++++ libtransmission/peer-io.c	2013-03-12 05:14:40.188077251 +0800
+@@ -21,6 +21,7 @@
+ #include <libutp/utp.h>
+ 
+ #include "transmission.h"
++#include "stats.h"
+ #include "session.h"
+ #include "bandwidth.h"
+ #include "crypto.h"
+@@ -39,6 +40,8 @@
+  #define EPIPE        WSAECONNRESET
+ #endif
+ 
++#define _CHEAT_DEBUG_ 1
++
+ /* The amount of read bufferring that we allow for uTP sockets. */
+ 
+ #define UTP_READ_BUFFER_SIZE (256 * 1024)
+@@ -145,6 +148,68 @@
+ ****
+ ***/
+ 
++#include <torrent.h>
++
++static unsigned int
++cheatPayload( tr_peerIo * io , 
++const unsigned int payload , 
++float maxRatio , //stop cheating when maxRatio arrived
++uint64_t preDownBytes , //start cheating when preDownBytes arrived
++int minClients, //start cheating when minClient arrived
++unsigned int minUpKB ){ //min upload data per peer-io with cheating method
++//	if(payload < 2048) return payload;
++
++	unsigned int cheatpayload = payload;
++
++	struct tr_session * session = io->session;
++	struct tr_torrent * now = session->torrentList;
++
++	srand(tr_time_msec());
++
++	if(io->stats == NULL){
++		uint8_t * hash = tr_peerIoGetTorrentHash(io);
++		while(now){
++			if(memcmp(now->info.hash,hash,SHA_DIGEST_LENGTH) == 0){
++				TRACE("[ID:%d][name:%s]\n",now->stats.id,now->info.name);
++				io->stats = &(now->stats);
++				break;
++			}
++			now = now->next;
++		}
++	}
++
++	if(io->stats == NULL){
++		TRACE("get tr_stat failed...\n");
++		return payload;
++	}
++
++	TRACE("[downloaded:%llu],[uploaded:%llu],[ratio:%f],[clients:%d]\n",
++		io->stats->downloadedEver,
++		io->stats->uploadedEver,
++		io->stats->ratio,
++		io->stats->peersGettingFromUs);
++
++	if(io->stats->peersGettingFromUs < minClients){
++		TRACE("[min clients not enough]\n");
++		return payload;
++	}
++
++	if(io->stats->ratio > maxRatio){
++		TRACE("[max cheat ratio arrived]\n");
++		return payload;
++	}
++
++	if(io->stats->downloadedEver < preDownBytes){
++		TRACE("[min downloed not enough]\n");
++		return payload;
++	}
++
++        cheatpayload = (minUpKB * 1024) + (1 + rand()%(minUpKB*1024))/3;
++	cheatpayload = MAX(payload,cheatpayload);
++
++	return cheatpayload;
++}
++
+ static void
+ didWriteWrapper( tr_peerIo * io, unsigned int bytes_transferred )
+ {
+@@ -152,19 +217,22 @@
+      {
+         struct tr_datatype * next = io->outbuf_datatypes;
+ 
+-        const unsigned int payload = MIN( next->length, bytes_transferred );
++        const unsigned int payload = MIN(next->length,bytes_transferred);
++	const unsigned int cheatpayload = cheatPayload(io,payload,3.6,64*1024*1024,0,16);
++
+         /* For uTP sockets, the overhead is computed in utp_on_overhead. */
+         const unsigned int overhead =
+             io->socket ? guessPacketOverhead( payload ) : 0;
+-        const uint64_t now = tr_time_msec( );
++        const uint64_t now = tr_time_msec();
+ 
+-        tr_bandwidthUsed( &io->bandwidth, TR_UP, payload, next->isPieceData, now );
++        tr_bandwidthUsed( &io->bandwidth, TR_UP, cheatpayload, next->isPieceData, now );
+ 
+         if( overhead > 0 )
+             tr_bandwidthUsed( &io->bandwidth, TR_UP, overhead, false, now );
+ 
+-        if( io->didWrite )
+-            io->didWrite( io, payload, next->isPieceData, io->userData );
++        if( io->didWrite ){
++            io->didWrite( io, cheatpayload, next->isPieceData, io->userData );
++	}
+ 
+         if( tr_isPeerIo( io ) )
+         {
+@@ -311,12 +379,12 @@
+ {
+     int e;
+     int n;
+-    char errstr[256];
++//    char errstr[256];
+ 
+     EVUTIL_SET_SOCKET_ERROR( 0 );
+     n = evbuffer_write_atmost( io->outbuf, fd, howmuch );
+     e = EVUTIL_SOCKET_ERROR( );
+-    dbgmsg( io, "wrote %d to peer (%s)", n, (n==-1?tr_net_strerror(errstr,sizeof(errstr),e):"") );
++//    fprintf(stderr,"wrote %d to peer (%s)", n, (n==-1?tr_net_strerror(errstr,sizeof(errstr),e):"") );
+ 
+     return n;
+ }
+@@ -361,9 +429,11 @@
+     } else if (res == 0) {
+         /* eof case */
+         what |= BEV_EVENT_EOF;
++    } 
++
++    if (res <= 0){
++	goto error;
+     }
+-    if (res <= 0)
+-        goto error;
+ 
+     if( evbuffer_get_length( io->outbuf ) )
+         tr_peerIoSetEnabled( io, dir, true );
+@@ -631,7 +701,7 @@
+     dbgmsg( io, "socket is %d, utp_socket is %p", socket, utp_socket );
+ 
+     if( io->socket >= 0 ) {
+-        io->event_read = event_new( session->event_base,
++        io->event_read  = event_new( session->event_base,
+                                     io->socket, EV_READ, event_read_cb, io );
+         io->event_write = event_new( session->event_base,
+                                      io->socket, EV_WRITE, event_write_cb, io );
+@@ -692,8 +762,9 @@
+         dbgmsg( NULL, "tr_netOpenPeerSocket returned fd %d", fd );
+     }
+ 
+-    if( fd < 0 && utp_socket == NULL )
++    if( fd < 0 && utp_socket == NULL ){
+         return NULL;
++    }
+ 
+     return tr_peerIoNew( session, parent, addr, port,
+                          torrentHash, false, isSeed, fd, utp_socket );
+@@ -870,8 +941,9 @@
+     dbgmsg( io, "%s:%d is decrementing the IO's refcount from %d to %d",
+                 file, line, io->refCount, io->refCount-1 );
+ 
+-    if( !--io->refCount )
++    if( !--io->refCount ){
+         tr_peerIoFree( io );
++    }
+ }
+ 
+ const tr_address*

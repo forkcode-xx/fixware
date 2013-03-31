@@ -1,0 +1,17 @@
+--- libtransmission/transmission.h	2012-10-24 20:59:15.649687988 +0800
++++ libtransmission/transmission.h	2012-12-27 09:31:41.741537524 +0800
+@@ -41,6 +41,14 @@
+ ****
+ ***/
+ 
++
++#ifdef _DEBUG_
++#define TRACE(fmt,a...) fprintf(stderr,"%s:%s,%d:"fmt"\n" \
++                                ,__FILE__,__FUNCTION__,__LINE__,##a)
++#else
++#define TRACE(fmt,a...)
++#endif
++
+ #include <inttypes.h> /* uintN_t */
+ #include <time.h> /* time_t */
+ 
